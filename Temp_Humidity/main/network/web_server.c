@@ -1,6 +1,7 @@
 #include "web_server.h"
 
 #include <stdbool.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,8 @@ typedef struct {
 } history_sample_t;
 
 _Static_assert(sizeof(history_sample_t) == 8, "History samples must remain compact");
+_Static_assert(APP_HISTORY_CAPACITY > 0, "History capacity must be positive");
+_Static_assert(APP_HISTORY_SAMPLE_INTERVAL_SECONDS > 0, "History interval must be positive");
 
 static const char *TAG = "web";
 static httpd_handle_t s_server;
@@ -84,18 +87,19 @@ static const char s_home_page[] =
     "<div class=\"chart-wrap\"><canvas id=\"trend\" aria-label=\"Interactive temperature and humidity trend graph\"></canvas></div></section>"
     "<section><h2>Status</h2><p class=\"status\" id=\"status\">Connecting to monitor...</p></section>"
     "</main><script>"
-    "const canvas=document.getElementById('trend'),ctx=canvas.getContext('2d');let samples=[],clockSynced=false,graphNow=0,historyTimer,clockReferenceUnix=0,clockReferenceMs=0,chartState=null,hoverIndex=-1;"
+    "const canvas=document.getElementById('trend'),ctx=canvas.getContext('2d');let samples=[],clockSynced=false,graphNow=0,historyTimer,clockReferenceUnix=0,clockReferenceMs=0,chartState=null,hoverIndex=-1,historyInterval=60;"
     "function esc(v){return String(v).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
     "function showBlink(enabled){const b=document.getElementById('blink-toggle');b.setAttribute('aria-pressed',enabled?'true':'false');b.textContent='Blink: '+(enabled?'On':'Off');}"
     "function updateClock(){const time=document.getElementById('clock-time'),date=document.getElementById('clock-date');if(!clockSynced){time.textContent='--:--:--';date.textContent='Synchronizing time...';return;}const now=new Date((clockReferenceUnix+(performance.now()-clockReferenceMs)/1000)*1000);time.textContent=now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});date.textContent=now.toLocaleDateString([],{weekday:'short',day:'2-digit',month:'short',year:'numeric'});}"
-    "async function loadReading(){try{const r=await fetch('/api/reading',{cache:'no-store'});if(!r.ok)throw Error(r.status);const d=await r.json();"
+    "async function requestJson(url,options={}){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),8000);try{const r=await fetch(url,{...options,cache:'no-store',signal:controller.signal});if(!r.ok)throw Error(r.status);return await r.json();}finally{clearTimeout(timeout);}}"
+    "async function loadReading(){try{const d=await requestJson('/api/reading');"
     "showBlink(d.blink_enabled);"
-    "if(d.has_reading){document.getElementById('temp-c').innerHTML=d.temperature_c.toFixed(1)+' &deg;C';document.getElementById('temp-f').innerHTML=d.temperature_f.toFixed(1)+' &deg;F';document.getElementById('humidity').textContent=d.humidity_percent.toFixed(1)+' %';}"
+    "if(d.has_reading){document.getElementById('temp-c').innerHTML=d.temperature_c.toFixed(1)+' &deg;C';document.getElementById('temp-f').innerHTML=d.temperature_f.toFixed(1)+' &deg;F';document.getElementById('humidity').textContent=d.humidity_percent.toFixed(1)+' %';}else{document.getElementById('temp-c').innerHTML='--.- &deg;C';document.getElementById('temp-f').innerHTML='--.- &deg;F';document.getElementById('humidity').textContent='--.- %';}"
     "const note=document.getElementById('reading-note');note.className='status'+(d.valid?'':' bad');note.textContent=d.valid?'Latest sensor read succeeded.':(d.has_reading?'Showing the last good value; the latest read failed.':'Waiting for a valid DHT11 reading.');"
     "document.getElementById('status').innerHTML='Sensor reads: '+d.read_count+'<br>Failed reads: '+d.failure_count+'<br>Last result: '+esc(d.last_result);"
-    "}catch(e){const n=document.getElementById('reading-note');n.className='status bad';n.textContent='Unable to update live reading.';}}"
-    "async function toggleBlink(){const b=document.getElementById('blink-toggle');b.disabled=true;try{const r=await fetch('/api/blink/toggle',{method:'POST',cache:'no-store'});if(!r.ok)throw Error(r.status);const d=await r.json();showBlink(d.blink_enabled);}catch(e){await loadReading();}finally{b.disabled=false;}}"
-    "async function loadHistory(){let retry=60000;try{const r=await fetch('/api/history',{cache:'no-store'});if(!r.ok)throw Error(r.status);const d=await r.json();samples=d.samples||[];hoverIndex=-1;clockSynced=d.time_synced;graphNow=clockSynced?d.current_unix_time:d.current_uptime_seconds;"
+    "}catch(e){const n=document.getElementById('reading-note');n.className='status bad';n.textContent='Unable to update live reading.';}finally{setTimeout(loadReading,5000);}}"
+    "async function toggleBlink(){const b=document.getElementById('blink-toggle');b.disabled=true;try{const d=await requestJson('/api/blink/toggle',{method:'POST'});showBlink(d.blink_enabled);}catch(e){document.getElementById('status').textContent='Unable to change blink setting.';}finally{b.disabled=false;}}"
+    "async function loadHistory(){let retry=60000;try{const d=await requestJson('/api/history');samples=d.samples||[];historyInterval=d.interval_seconds;hoverIndex=-1;clockSynced=d.time_synced;graphNow=clockSynced?d.current_unix_time:d.current_uptime_seconds;"
     "if(clockSynced){clockReferenceUnix=d.current_unix_time;clockReferenceMs=performance.now();const offset=d.current_unix_time-d.current_uptime_seconds;samples.forEach(s=>s.unix_time=offset+s.seconds_since_boot);}else retry=5000;updateClock();"
     "const count=samples.length? samples.length+' of '+d.capacity+' one-minute samples':'Collecting the first one-minute sample...';document.getElementById('history-note').textContent=count+(clockSynced?' - clock synchronized':' - waiting for time sync');draw();"
     "}catch(e){retry=5000;document.getElementById('history-note').textContent='Unable to load history.';}finally{clearTimeout(historyTimer);historyTimer=setTimeout(loadHistory,retry);}}"
@@ -111,9 +115,9 @@ static const char s_home_page[] =
     "const tr=range(samples.map(s=>s.temperature_c),.1,2),hr=range(samples.map(s=>s.humidity_percent),.1,5),key=clockSynced?'unix_time':'seconds_since_boot',last=Math.max(graphNow,samples[samples.length-1][key]),first=samples.length>1?samples[0][key]:last-60,span=Math.max(1,last-first);"
     "chartState={l,t,pw,ph,w,h,tr,hr,key,first,last,span};"
     "ctx.textAlign='right';ctx.fillStyle='#b43d3d';ctx.fillText(tr[1].toFixed(1)+' C',l-7,t);ctx.fillText(tr[0].toFixed(1)+' C',l-7,t+ph);ctx.textAlign='left';ctx.fillStyle='#236aaa';ctx.fillText(hr[1].toFixed(1)+' %',w-r+7,t);ctx.fillText(hr[0].toFixed(1)+' %',w-r+7,t+ph);"
-    "function line(valueKey,rg,colour){ctx.beginPath();samples.forEach((s,i)=>{const x=l+(s[key]-first)/span*pw,y=t+(rg[1]-s[valueKey])/(rg[1]-rg[0])*ph;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.strokeStyle=colour;ctx.lineWidth=2;ctx.stroke();}"
+    "function line(valueKey,rg,colour){ctx.beginPath();samples.forEach((s,i)=>{const x=l+(s[key]-first)/span*pw,y=t+(rg[1]-s[valueKey])/(rg[1]-rg[0])*ph;if(i&&s.seconds_since_boot-samples[i-1].seconds_since_boot<=historyInterval*1.5)ctx.lineTo(x,y);else ctx.moveTo(x,y);});ctx.strokeStyle=colour;ctx.lineWidth=2;ctx.stroke();samples.forEach((s,i)=>{const joinsPrevious=i>0&&s.seconds_since_boot-samples[i-1].seconds_since_boot<=historyInterval*1.5,joinsNext=i+1<samples.length&&samples[i+1].seconds_since_boot-s.seconds_since_boot<=historyInterval*1.5;if(!joinsPrevious&&!joinsNext){ctx.beginPath();ctx.arc(l+(s[key]-first)/span*pw,t+(rg[1]-s[valueKey])/(rg[1]-rg[0])*ph,3,0,Math.PI*2);ctx.fillStyle=colour;ctx.fill();}});}"
     "line('temperature_c',tr,'#d34a4a');line('humidity_percent',hr,'#2878c8');const ticks=w<500?2:4;ctx.fillStyle='#65758a';ctx.textAlign='center';for(let i=0;i<=ticks;i++){const ratio=i/ticks,x=l+ratio*pw,value=first+ratio*span,label=clockSynced?new Date(value*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):(i===ticks?'now':'-'+Math.round((last-value)/3600)+'h');ctx.fillText(label,x,h-12);}drawTooltip();}" 
-    "canvas.addEventListener('pointermove',selectPoint);canvas.addEventListener('pointerdown',selectPoint);canvas.addEventListener('pointerleave',clearPoint);canvas.addEventListener('pointercancel',clearPoint);document.getElementById('blink-toggle').addEventListener('click',toggleBlink);window.addEventListener('resize',draw);updateClock();loadReading();loadHistory();setInterval(loadReading,5000);setInterval(updateClock,1000);"
+    "canvas.addEventListener('pointermove',selectPoint);canvas.addEventListener('pointerdown',selectPoint);canvas.addEventListener('pointerleave',clearPoint);canvas.addEventListener('pointercancel',clearPoint);document.getElementById('blink-toggle').addEventListener('click',toggleBlink);window.addEventListener('resize',draw);updateClock();loadReading();loadHistory();setInterval(updateClock,1000);"
     "</script></body></html>";
 
 static void log_server_address(const esp_ip4_addr_t *ip)
@@ -232,7 +236,8 @@ static esp_err_t send_home_page(httpd_req_t *req)
 
 static esp_err_t send_reading_json(httpd_req_t *req)
 {
-    char buffer[256];
+    char buffer[384];
+    int length;
     web_reading_state_t state;
 
     if (!get_state_snapshot(&state)) {
@@ -243,7 +248,7 @@ static esp_err_t send_reading_json(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
     if (state.has_reading) {
-        snprintf(buffer,
+        length = snprintf(buffer,
                  sizeof(buffer),
                  "{\"valid\":%s,\"has_reading\":true,\"stale\":%s,\"temperature_c\":%.1f,"
                  "\"temperature_f\":%.1f,\"humidity_percent\":%.1f,"
@@ -258,7 +263,7 @@ static esp_err_t send_reading_json(httpd_req_t *req)
                  esp_err_to_name(state.last_result),
                  status_led_is_blink_enabled() ? "true" : "false");
     } else {
-        snprintf(buffer,
+        length = snprintf(buffer,
                  sizeof(buffer),
                  "{\"valid\":false,\"has_reading\":false,\"stale\":false,\"read_count\":%lu,"
                  "\"failure_count\":%lu,\"last_result\":\"%s\",\"blink_enabled\":%s}",
@@ -268,7 +273,10 @@ static esp_err_t send_reading_json(httpd_req_t *req)
                  status_led_is_blink_enabled() ? "true" : "false");
     }
 
-    return httpd_resp_sendstr(req, buffer);
+    if (length < 0 || (size_t)length >= sizeof(buffer)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Reading response too large");
+    }
+    return httpd_resp_send(req, buffer, length);
 }
 
 static esp_err_t toggle_blink(httpd_req_t *req)
@@ -287,7 +295,7 @@ static esp_err_t toggle_blink(httpd_req_t *req)
 
 static esp_err_t send_history_json(httpd_req_t *req)
 {
-    char buffer[192];
+    char buffer[768];
     history_sample_t *snapshot = NULL;
     size_t count;
 
@@ -299,9 +307,12 @@ static esp_err_t send_history_json(httpd_req_t *req)
     if (count > 0) {
         snapshot = malloc(count * sizeof(*snapshot));
         if (snapshot != NULL) {
-            for (size_t i = 0; i < count; i++) {
-                snapshot[i] = s_history[(s_history_start + i) % APP_HISTORY_CAPACITY];
+            size_t first_count = APP_HISTORY_CAPACITY - s_history_start;
+            if (first_count > count) {
+                first_count = count;
             }
+            memcpy(snapshot, &s_history[s_history_start], first_count * sizeof(*snapshot));
+            memcpy(snapshot + first_count, s_history, (count - first_count) * sizeof(*snapshot));
         }
     }
     xSemaphoreGive(s_state_mutex);
@@ -316,7 +327,7 @@ static esp_err_t send_history_json(httpd_req_t *req)
     uint32_t current_uptime_seconds = (uint32_t)(esp_timer_get_time() / 1000000);
     time_t current_epoch = 0;
     bool time_synced = time_sync_get_epoch(&current_epoch);
-    snprintf(buffer,
+    int length = snprintf(buffer,
              sizeof(buffer),
              "{\"capacity\":%u,\"interval_seconds\":%u,\"count\":%u,\"time_synced\":%s,"
              "\"current_unix_time\":%lld,\"current_uptime_seconds\":%lu,\"samples\":[",
@@ -327,19 +338,41 @@ static esp_err_t send_history_json(httpd_req_t *req)
              (long long)(time_synced ? current_epoch : 0),
              (unsigned long)current_uptime_seconds);
 
-    esp_err_t result = httpd_resp_sendstr_chunk(req, buffer);
+    if (length < 0 || (size_t)length >= sizeof(buffer)) {
+        free(snapshot);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "History response too large");
+    }
+
+    size_t used = (size_t)length;
+    esp_err_t result = ESP_OK;
     for (size_t i = 0; result == ESP_OK && i < count; i++) {
-        snprintf(buffer,
-                 sizeof(buffer),
+        /* Reserve enough room for the largest sample, batching small JSON records
+         * rather than making a separate socket send for every minute. */
+        if (sizeof(buffer) - used < 128) {
+            result = httpd_resp_send_chunk(req, buffer, used);
+            used = 0;
+            if (result != ESP_OK) {
+                break;
+            }
+        }
+        length = snprintf(buffer + used,
+                 sizeof(buffer) - used,
                  "%s{\"seconds_since_boot\":%lu,\"temperature_c\":%.1f,\"humidity_percent\":%.1f}",
                  i == 0 ? "" : ",",
                  (unsigned long)snapshot[i].seconds_since_boot,
                  (double)snapshot[i].temperature_tenths_c / 10.0,
                  (double)snapshot[i].humidity_tenths_percent / 10.0);
-        result = httpd_resp_sendstr_chunk(req, buffer);
+        if (length < 0 || (size_t)length >= sizeof(buffer) - used) {
+            result = ESP_FAIL;
+            break;
+        }
+        used += (size_t)length;
     }
 
     free(snapshot);
+    if (result == ESP_OK) {
+        result = httpd_resp_send_chunk(req, buffer, used);
+    }
     if (result == ESP_OK) {
         result = httpd_resp_sendstr_chunk(req, "]}");
     }
@@ -443,7 +476,11 @@ void web_server_update_reading(const dht11_reading_t *reading, esp_err_t result)
         return;
     }
 
-    if (result == ESP_OK && reading == NULL) {
+    if (result == ESP_OK &&
+        (reading == NULL || !isfinite(reading->temperature_c) ||
+         !isfinite(reading->temperature_f) || !isfinite(reading->humidity_percent) ||
+         reading->temperature_c < -3276.0f || reading->temperature_c > 3276.0f ||
+         reading->humidity_percent < 0.0f || reading->humidity_percent > 100.0f)) {
         result = ESP_ERR_INVALID_ARG;
     }
 

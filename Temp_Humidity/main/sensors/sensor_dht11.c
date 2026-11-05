@@ -6,9 +6,9 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
-#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define DHT11_START_SIGNAL_MS 20
 #define DHT11_RESPONSE_TIMEOUT_US 120
@@ -129,10 +129,8 @@ esp_err_t dht11_init(gpio_num_t gpio_num)
 {
     ESP_RETURN_ON_FALSE(GPIO_IS_VALID_OUTPUT_GPIO(gpio_num), ESP_ERR_INVALID_ARG, TAG, "invalid DHT11 GPIO");
 
-    s_sensor_gpio = gpio_num;
-
     gpio_config_t config = {
-        .pin_bit_mask = 1ULL << s_sensor_gpio,
+        .pin_bit_mask = 1ULL << gpio_num,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -140,6 +138,7 @@ esp_err_t dht11_init(gpio_num_t gpio_num)
     };
 
     ESP_RETURN_ON_ERROR(gpio_config(&config), TAG, "failed to configure DHT11 GPIO");
+    s_sensor_gpio = gpio_num;
     s_initialized = true;
 
     return ESP_OK;
@@ -161,7 +160,9 @@ esp_err_t dht11_read(dht11_reading_t *reading)
     ESP_RETURN_ON_ERROR(gpio_set_direction(s_sensor_gpio, GPIO_MODE_OUTPUT_OD),
                         TAG,
                         "failed to start DHT11 signal");
-    esp_rom_delay_us(DHT11_START_SIGNAL_MS * 1000);
+    // The start pulse only has a minimum duration; yield instead of busy-waiting.
+    // An extra tick covers starting the delay just before a tick boundary.
+    vTaskDelay(pdMS_TO_TICKS(DHT11_START_SIGNAL_MS) + 1);
 
     // Release the open-drain bus and keep scheduling from stretching the 26-70 us pulses.
     taskENTER_CRITICAL(&s_read_lock);
@@ -185,6 +186,10 @@ esp_err_t dht11_read(dht11_reading_t *reading)
                         ESP_ERR_INVALID_RESPONSE,
                         TAG,
                         "DHT11 returned an out-of-range value");
+    ESP_RETURN_ON_FALSE(data[0] < 100 || data[1] == 0,
+                        ESP_ERR_INVALID_RESPONSE,
+                        TAG,
+                        "DHT11 humidity exceeds 100 percent");
 
     reading->humidity_percent = (float)data[0] + ((float)data[1] / 10.0f);
     reading->temperature_c = (float)data[2] + ((float)data[3] / 10.0f);

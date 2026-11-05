@@ -4,7 +4,6 @@
   "idf.openOcdConfigs": [
     "board/esp32-wrover-kit-3.3v.cfg"
   ],
-  "idf.portWin": "COM3",
   "idf.currentSetup": "E:\\esp\\v6.0\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32"
@@ -15,5 +14,6 @@
     "--query-driver=**",
     "--compile-commands-dir=d:\\PROJECTS\\Q_AIR_TEMP_MONITOR\\Temp_Humidity\\build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.port": "COM3"
 }

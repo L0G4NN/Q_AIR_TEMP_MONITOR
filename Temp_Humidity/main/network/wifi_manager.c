@@ -64,6 +64,9 @@ esp_err_t wifi_manager_start(void)
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "failed to initialize Wi-Fi");
+    /* Credentials already come from secrets.h; avoid persisting another copy
+     * in NVS or rewriting flash when the configuration changes. */
+    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "failed to select RAM Wi-Fi storage");
 
     esp_event_handler_instance_t wifi_instance;
     ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(WIFI_EVENT,

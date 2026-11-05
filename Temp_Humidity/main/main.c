@@ -13,6 +13,9 @@
 
 static const char *TAG = "app";
 
+_Static_assert(APP_SENSOR_READ_PERIOD_MS > 2000, "DHT11 reads must be more than two seconds apart");
+_Static_assert(APP_DHT11_POWER_UP_DELAY_MS >= 1000, "DHT11 needs one second to power up");
+
 static void init_nvs(void)
 {
     esp_err_t result = nvs_flash_init();
@@ -62,6 +65,10 @@ void app_main(void)
             ESP_LOGW(TAG, "DHT11 read failed: %s", esp_err_to_name(result));
         }
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(APP_SENSOR_READ_PERIOD_MS));
+        if (xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(APP_SENSOR_READ_PERIOD_MS)) == pdFALSE) {
+            // Rebase after an overrun instead of issuing rapid catch-up sensor requests.
+            last_wake = xTaskGetTickCount();
+            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(APP_SENSOR_READ_PERIOD_MS));
+        }
     }
 }

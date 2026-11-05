@@ -2,7 +2,7 @@
 
 This folder contains the ESP-IDF firmware for the Q Air Temp Monitor desk temperature sensor.
 
-The firmware reads a DHT11 temperature/humidity sensor every 2.5 seconds, pulses a status LED each time a reading is attempted, connects to Wi-Fi, and serves the latest values from an ESP-IDF HTTP server. The automatic read blink can be enabled or disabled from the button beside the webpage title. Successful readings are averaged into one-minute trend samples. A 1,440-point RAM ring buffer retains up to 24 hours of temperature and humidity history. SNTP synchronizes the ESP32 clock after Wi-Fi connects so the title bar can show the current date and time and the graph can display local clock times along its x-axis. Sensor sampling continues while Wi-Fi is disconnected, and the station reconnects automatically.
+The firmware reads a DHT11 temperature/humidity sensor every 2.5 seconds, pulses a status LED each time a reading is attempted, connects to Wi-Fi, and serves the latest values from an ESP-IDF HTTP server. The automatic read blink can be enabled or disabled from the button beside the webpage title. Successful readings are averaged into one-minute trend samples. A 1,440-point RAM ring buffer retains the latest populated minutes: approximately 24 hours with continuous readings, potentially longer when intervals are missing. SNTP synchronizes the ESP32 clock after Wi-Fi connects so the title bar can show the current date and time and the graph can display local clock times along its x-axis. Sensor sampling continues while Wi-Fi is disconnected, and the station reconnects automatically.
 
 ## File Layout
 
@@ -24,9 +24,9 @@ The firmware reads a DHT11 temperature/humidity sensor every 2.5 seconds, pulses
 - Sensor read period: 2500 ms
 - LED pulse hold time: 60 ms
 - Trend sample interval: 60 seconds
-- Trend capacity: 1440 samples (24 hours)
+- Trend capacity: 1440 populated minute intervals (approximately 24 hours with continuous readings)
 - Time server: `pool.ntp.org`
-- Timezone: UK GMT/BST
+- Firmware timezone: UK GMT/BST; browser labels use the browser's local timezone
 
 Change these values in `main/include/app_config.h` if your board uses different pins. The read period must remain above 2000 ms for a DHT11.
 
@@ -41,7 +41,7 @@ If `main/include/secrets.h` is missing, copy `main/include/secrets.example.h` to
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 ```
 
-`secrets.h` is ignored by this ESP-IDF project's `.gitignore`. Keep `secrets.example.h` as the template if you publish the project.
+`secrets.h` is ignored by Git. Keep `secrets.example.h` as the template if you publish the project. Build output is ignored too: the firmware binary contains the compiled credentials. Wi-Fi uses RAM configuration storage, avoiding new credential/configuration writes to NVS. Credentials written by older firmware are not erased by this setting.
 
 ## Web Page
 
@@ -58,16 +58,13 @@ Routes:
 - `/api/history` - streamed JSON containing the retained one-minute trend samples plus the synchronized Unix-time/uptime reference used for graph labels
 - `POST /api/blink/toggle` - toggles the automatic status-LED pulse and returns its new state
 
-Trend history is stored in RAM and starts empty after the ESP32 restarts. Minutes without a successful DHT11 reading are omitted instead of recording a misleading value. Until SNTP succeeds, the graph temporarily uses elapsed-time labels and retries the clock reference every five seconds.
+Trend history is stored in RAM and starts empty after the ESP32 restarts. Minutes without a successful DHT11 reading are omitted instead of recording a misleading value; the graph breaks lines across missing intervals. Until SNTP succeeds, the graph temporarily uses elapsed-time labels and retries the clock reference every five seconds. Live values refresh every five seconds after the preceding request completes; synchronized history refreshes every minute. Blink selection also resets on reboot.
 
 Hover over the graph with a mouse, or tap it on a touchscreen, to select the nearest one-minute sample. The graph displays its time, temperature, and humidity with a guide line and highlighted markers.
 
 ## Build
 
-```text
-idf.py set-target esp32
-idf.py build
-```
+Activate an ESP-IDF 6.0 terminal first, then run `idf.py build` from this directory. The local installation uses the ESP-IDF Python environment and Xtensa toolchain; an ordinary Python terminal is insufficient.
 
 The checked-in configuration currently targets the original ESP32. Use a different `set-target` value only if the board uses another ESP32 family chip.
 
@@ -78,3 +75,25 @@ idf.py -p COM_PORT flash monitor
 ```
 
 Replace `COM_PORT` with the board serial port.
+
+## Reliability and resource use
+
+- Sensor start pulses yield to FreeRTOS rather than busy-waiting for 20 ms. The short microsecond frame capture remains protected from scheduling interruptions.
+- Sampling rebases its schedule after an overrun to avoid rapid catch-up requests to the DHT11.
+- Checksum and range checks reject corrupt frames, including humidity above 100%. Failed reads retain the last good dashboard values.
+- LED toggle state and GPIO updates share a lock across the HTTP and sampling tasks.
+- SNTP initializes once before registering its IP handler and restarts synchronization on IP acquisition.
+- History samples occupy 8 bytes each (11,520 bytes for the ring). An HTTP request snapshots populated samples before transmission, temporarily allocating up to another 11,520 bytes. Copies use at most two contiguous memory operations; JSON records are batched into HTTP chunks.
+- JSON formatting checks response bounds, and live browser polling waits for each request to complete before scheduling another.
+
+The DHT11 has coarse measurement resolution. Averaged decimal values do not imply more precise hardware measurements. History does not persist across resets.
+
+## Verification
+
+Build with `idf.py build` in this directory. From the repository root, run the browser regression tests with Node.js 18 or newer:
+
+```text
+node Temp_Humidity/tests/test_web_ui.js
+```
+
+These tests execute the actual JavaScript embedded in the firmware, checking reboot display reset, sequential polling and timeouts, failed blink toggles, graph gaps, and isolated readings. They require no additional packages. A successful build and host tests do not validate DHT11 pulse timing or Wi-Fi reconnects on the physical board; verify those after flashing. Capture any history you need before flashing, since a reset clears the RAM buffer.

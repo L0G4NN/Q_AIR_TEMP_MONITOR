@@ -11,19 +11,12 @@
 
 static const char *TAG = "time";
 static bool s_started;
-static bool s_sntp_initialized;
 static esp_event_handler_instance_t s_ip_event_instance;
 
-static esp_err_t initialize_sntp(void)
+static esp_err_t start_sntp(void)
 {
-    if (s_sntp_initialized) {
-        return ESP_OK;
-    }
-
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(APP_NTP_SERVER);
-    esp_err_t result = esp_netif_sntp_init(&config);
+    esp_err_t result = esp_netif_sntp_start();
     if (result == ESP_OK) {
-        s_sntp_initialized = true;
         ESP_LOGI(TAG, "Synchronizing time from %s", APP_NTP_SERVER);
     }
     return result;
@@ -36,7 +29,7 @@ static void got_ip_handler(void *arg, esp_event_base_t event_base, int32_t event
     (void)event_id;
     (void)event_data;
 
-    esp_err_t result = initialize_sntp();
+    esp_err_t result = start_sntp();
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start time synchronization: %s", esp_err_to_name(result));
     }
@@ -53,12 +46,23 @@ esp_err_t time_sync_start(void)
     }
     tzset();
 
-    esp_err_t result = esp_event_handler_instance_register(IP_EVENT,
-                                                            IP_EVENT_STA_GOT_IP,
-                                                            &got_ip_handler,
-                                                            NULL,
-                                                            &s_ip_event_instance);
+    /* Initialize before registering the handler: app_main and the IP event
+     * task must never race to initialize the singleton SNTP service. */
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(APP_NTP_SERVER);
+    config.start = false;
+    config.wait_for_sync = false;
+    esp_err_t result = esp_netif_sntp_init(&config);
     if (result != ESP_OK) {
+        return result;
+    }
+
+    result = esp_event_handler_instance_register(IP_EVENT,
+                                                 IP_EVENT_STA_GOT_IP,
+                                                 &got_ip_handler,
+                                                 NULL,
+                                                 &s_ip_event_instance);
+    if (result != ESP_OK) {
+        esp_netif_sntp_deinit();
         return result;
     }
 
@@ -67,7 +71,13 @@ esp_err_t time_sync_start(void)
     esp_netif_t *station = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_ip_info_t ip_info = {0};
     if (station != NULL && esp_netif_get_ip_info(station, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
-        return initialize_sntp();
+        result = start_sntp();
+        if (result != ESP_OK) {
+            esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_event_instance);
+            esp_netif_sntp_deinit();
+            s_started = false;
+            return result;
+        }
     }
 
     return ESP_OK;

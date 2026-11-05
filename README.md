@@ -1,68 +1,55 @@
 # Q Air Temp Monitor
 
-Q Air Temp Monitor is a desk temperature and humidity sensor project built with ESP-IDF. The firmware reads a DHT11 sensor every 2.5 seconds, blinks a status LED for each read attempt, connects to Wi-Fi, and serves the latest readings on a local web page.
+An ESP32 desk temperature and humidity monitor using a DHT11 and ESP-IDF 6.0. The device samples every 2.5 seconds and serves a local browser dashboard with live readings, a clock, an LED blink toggle, and an interactive temperature/humidity graph.
 
-## Project Goal
+## Firmware and hardware
 
-The device sits on a desk, reads local temperature and humidity data, connects to Wi-Fi, and displays the readings in a browser.
+The maintained firmware is in [`Temp_Humidity`](Temp_Humidity/README.md). The older Arduino reference is in `sketch_jul16a`.
 
-## Current Firmware
+| Setting | Default |
+| --- | --- |
+| Target | Original ESP32 |
+| DHT11 data | GPIO 4 |
+| Status LED | GPIO 2, active high |
+| Sensor interval | 2.5 seconds |
+| History | 1,440 one-minute averages in RAM |
+| Time synchronization | SNTP using `pool.ntp.org` |
 
-- ESP-IDF project location: `Temp_Humidity`
-- Sensor: DHT11 on `GPIO_NUM_4`
-- Status LED: `GPIO_NUM_2`
-- Read period: 2500 ms
-- Web routes: `/` and `/api/reading`
-- Wi-Fi credentials: `Temp_Humidity/main/include/secrets.h`
-- Arduino sketch location: `sketch_jul16a`
-- Sketch status: older Arduino DHT11 temperature and humidity reader with a Wi-Fi web page
+Power the DHT11 from 3.3 V, share ground with the ESP32, and use a 4.7-10 kOhm pull-up from data to 3.3 V. Sensor modules often include the pull-up. Pins and timing are configured in `Temp_Humidity/main/include/app_config.h`.
 
-The ESP-IDF project is the main firmware. The Arduino sketch is kept as a simple reference.
+## Setup and build
 
-## Arduino DHT11 Sketch
+Use an ESP-IDF 6.0 terminal with its Python environment and toolchain activated. From the repository root:
 
-The `sketch_jul16a/sketch_jul16a.ino` sketch reads a DHT11 sensor and serves the latest temperature and humidity readings on a simple web page.
-
-Before uploading, update these values in the sketch:
-
-- `DHT_PIN` if the DHT11 data line is not connected to GPIO 4.
-- `ssid` and `password` with the WiFi network details.
-
-## ESP-IDF Setup
-
-Before building the ESP-IDF project, edit:
-
-```text
-Temp_Humidity/main/include/secrets.h
+```powershell
+Copy-Item Temp_Humidity/main/include/secrets.example.h Temp_Humidity/main/include/secrets.h
 ```
 
-If that ignored local file is missing, create it by copying `secrets.example.h` from the same directory.
-
-Set:
-
-```c
-#define WIFI_SSID "YOUR_WIFI_NAME"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-```
-
-Change GPIO defaults in `Temp_Humidity/main/include/app_config.h` if needed.
-
-## Build
-
-From the firmware directory:
+Run the copy only for a fresh checkout; edit your existing `secrets.h` if it is already present. Enter your Wi-Fi name and password there, then build:
 
 ```text
 cd Temp_Humidity
-idf.py set-target esp32
 idf.py build
-```
-
-The checked-in configuration targets the original ESP32. Change the target only if the board uses a different ESP32 family chip.
-
-## Flash
-
-```text
 idf.py -p COM_PORT flash monitor
 ```
 
-Replace `COM_PORT` with the serial port for the connected board.
+Replace `COM_PORT` with your board's port. The checked-in `sdkconfig` targets `esp32`. For another ESP32 family chip, run `idf.py set-target YOUR_TARGET` before building and check the GPIO assignments. After flashing, open the local IP address printed in the serial monitor.
+
+## Dashboard and API
+
+| Route | Purpose |
+| --- | --- |
+| `GET /` | Dashboard, clock, graph, and blink control |
+| `GET /api/reading` | Latest attempt status, last good values, read/failure counters, and blink state |
+| `GET /api/history` | Minute averages with uptime and clock reference |
+| `POST /api/blink/toggle` | Toggle the automatic read LED pulse |
+
+Failed sensor reads retain the last good value and mark it stale. History averages successful reads only and omits empty intervals. The ring holds the latest 1,440 populated minutes: approximately 24 hours with continuous readings, potentially longer when readings are missing. History and blink selection reset on reboot. DHT11 output is coarse; decimal formatting and averaging do not increase the sensor's physical resolution.
+
+Sampling continues through Wi-Fi outages. Wi-Fi reconnects automatically, and SNTP restarts after an IP address is acquired. The browser displays synchronized timestamps in its own local timezone.
+
+## Credentials
+
+`secrets.h`, build output, and local agent settings are ignored by Git. Only the placeholder `secrets.example.h` should be shared. Wi-Fi configuration uses RAM storage to avoid writing another copy to NVS; this does not erase configuration stored by older firmware. Credentials are still compiled into firmware binaries, so keep generated binaries private.
+
+See the [firmware README](Temp_Humidity/README.md) for implementation details and verification commands.
