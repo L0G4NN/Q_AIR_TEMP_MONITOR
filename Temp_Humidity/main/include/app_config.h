@@ -1,0 +1,19 @@
+#ifndef APP_CONFIG_H
+#define APP_CONFIG_H
+
+#include "driver/gpio.h"
+
+#define APP_DHT11_GPIO GPIO_NUM_4
+#define APP_STATUS_LED_GPIO GPIO_NUM_2
+
+#define APP_DHT11_POWER_UP_DELAY_MS 1000
+#define APP_SENSOR_READ_PERIOD_MS 2500
+#define APP_READ_BLINK_HOLD_MS 60
+
+#define APP_HISTORY_SAMPLE_INTERVAL_SECONDS 60
+#define APP_HISTORY_CAPACITY 1440
+
+#define APP_NTP_SERVER "pool.ntp.org"
+#define APP_TIMEZONE "GMT0BST,M3.5.0/1,M10.5.0/2"
+
+#endif
