@@ -79,7 +79,7 @@ Replace `COM_PORT` with the board serial port.
 ## Reliability and resource use
 
 - Sensor start pulses yield to FreeRTOS rather than busy-waiting for 20 ms. The short microsecond frame capture remains protected from scheduling interruptions.
-- Sampling rebases its schedule after an overrun to avoid rapid catch-up requests to the DHT11.
+- The next read is scheduled from the completion of each sensor attempt so delayed wake-ups preserve the configured minimum interval.
 - Checksum and range checks reject corrupt frames, including humidity above 100%. Failed reads retain the last good dashboard values.
 - LED toggle state and GPIO updates share a lock across the HTTP and sampling tasks.
 - SNTP initializes once before registering its IP handler and restarts synchronization on IP acquisition.

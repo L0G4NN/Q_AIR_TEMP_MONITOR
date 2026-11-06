@@ -67,6 +67,21 @@ const run = code => vm.runInContext(code, context);
   assert.equal(element('blink-toggle').disabled, false);
   assert.equal(timers.size, 0);
 
+  // A reading captured before the toggle may arrive after the POST response.
+  let finishReading;
+  fetchImpl = url => url === '/api/reading'
+    ? new Promise(resolve => { finishReading = resolve; })
+    : Promise.resolve({ ok: true, json: async () => ({ blink_enabled: false }) });
+  const earlierPoll = run('loadReading()');
+  await run('toggleBlink()');
+  finishReading({ ok: true, json: async () => ({ blink_enabled: true, has_reading: false }) });
+  await earlierPoll;
+  assert.equal(element('blink-toggle').textContent, 'Blink: Off');
+  // A later poll must still reflect changes made by another browser.
+  fetchImpl = async () => ({ ok: true, json: async () => ({ blink_enabled: true, has_reading: false }) });
+  await run('loadReading()');
+  assert.equal(element('blink-toggle').textContent, 'Blink: On');
+
   // Missing minutes split each sensor's line instead of implying continuous readings.
   run("clockSynced=false;graphNow=240;historyInterval=60;samples=[{seconds_since_boot:60,temperature_c:20,humidity_percent:50},{seconds_since_boot:120,temperature_c:21,humidity_percent:51},{seconds_since_boot:240,temperature_c:22,humidity_percent:52}];draw();");
   const chart = drawCalls.filter(c => (c[0] === 'moveTo' || c[0] === 'lineTo') && c[1] !== 48 && c[1] !== 852);
@@ -74,7 +89,11 @@ const run = code => vm.runInContext(code, context);
   assert.equal(chart.filter(c => c[0] === 'lineTo').length, 2);
   drawCalls.length = 0;
   run('samples=samples.slice(0,1);draw();');
-  assert.equal(drawCalls.filter(c => c[0] === 'arc').length, 2, 'single samples must be visible');
+  const markers = drawCalls.filter(call => call[0] === 'arc');
+  assert.equal(markers.length, 2);
+  const { l, pw } = run('chartState');
+  assert.ok(markers.every(([, x]) => x >= l && x <= l + pw),
+    'the only sample must remain inside the plot when it is several minutes old');
   drawCalls.length = 0;
   run("samples=[{seconds_since_boot:60,temperature_c:20,humidity_percent:50},{seconds_since_boot:180,temperature_c:21,humidity_percent:51},{seconds_since_boot:360,temperature_c:22,humidity_percent:52}];graphNow=360;draw();");
   assert.equal(drawCalls.filter(c => c[0] === 'arc').length, 6, 'every isolated sample needs a marker for each series');

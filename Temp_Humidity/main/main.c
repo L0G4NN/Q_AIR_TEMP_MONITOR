@@ -43,13 +43,12 @@ void app_main(void)
     ESP_LOGI(TAG, "Waiting for DHT11 sensor to stabilise");
     vTaskDelay(pdMS_TO_TICKS(APP_DHT11_POWER_UP_DELAY_MS));
 
-    TickType_t last_wake = xTaskGetTickCount();
-
     while (1) {
         dht11_reading_t reading = {0};
 
         status_led_set(true);
         esp_err_t result = dht11_read(&reading);
+        TickType_t read_completed = xTaskGetTickCount();
         vTaskDelay(pdMS_TO_TICKS(APP_READ_BLINK_HOLD_MS));
         status_led_set(false);
 
@@ -65,10 +64,8 @@ void app_main(void)
             ESP_LOGW(TAG, "DHT11 read failed: %s", esp_err_to_name(result));
         }
 
-        if (xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(APP_SENSOR_READ_PERIOD_MS)) == pdFALSE) {
-            // Rebase after an overrun instead of issuing rapid catch-up sensor requests.
-            last_wake = xTaskGetTickCount();
-            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(APP_SENSOR_READ_PERIOD_MS));
-        }
+        // Anchor each wait to this attempt, including failed reads. The extra tick
+        // covers completion just before a tick boundary.
+        xTaskDelayUntil(&read_completed, pdMS_TO_TICKS(APP_SENSOR_READ_PERIOD_MS) + 1);
     }
 }
