@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "nvs.h"
 
 #define SECOND_US INT64_C(1000000)
 #define RETRY_DELAY (5 * SECOND_US)
