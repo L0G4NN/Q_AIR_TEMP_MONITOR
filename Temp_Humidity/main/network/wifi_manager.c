@@ -22,13 +22,17 @@
 #define RETRY_DELAY (5 * SECOND_US)
 #define SETUP_TIMEOUT (30 * SECOND_US)
 #define SETUP_SUCCESS_GRACE (30 * SECOND_US)
+#define SETUP_MAX_HANDOFF (120 * SECOND_US)
+#define MODE_RETRY_DELAY SECOND_US
 
 typedef enum {
     NORMAL,
     SETUP_STARTING,
     SETUP_READY,
     SETUP_TESTING,
+    SETUP_RESET_STA,
     SETUP_STOPPING_STA,
+    SETUP_ENABLE_STA,
     SETUP_SAVED,
 } wifi_state_t;
 
@@ -44,6 +48,8 @@ static char s_address[16];
 static bool s_scanning;
 static int64_t s_deadline;
 static int64_t s_retry_at;
+static int64_t s_mode_retry_at;
+static int64_t s_handoff_limit;
 
 static void log_setup_network(void)
 {
@@ -63,20 +69,26 @@ static esp_err_t configure_station(const wifi_credentials_t *credentials)
     return esp_wifi_set_config(WIFI_IF_STA, &config);
 }
 
-/* Restart just the station. Waiting for STA_STOP before re-enabling it drains
- * the old attempt's events and drops its DHCP state. The setup AP stays up. */
-static void reset_setup_station(void)
-{
-    s_state = SETUP_STOPPING_STA;
-    s_deadline = esp_timer_get_time() + SETUP_TIMEOUT;
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-}
-
+/* Wait for STA_STOP before enabling it again so the default handler can
+ * tear down the previous attempt's DHCP client. Keep the setup AP running. */
 static void setup_failed(const char *message)
 {
     s_message = message;
     memset(&s_candidate, 0, sizeof(s_candidate));
-    reset_setup_station();
+    s_state = SETUP_RESET_STA;
+    s_mode_retry_at = esp_timer_get_time();
+    s_deadline = s_mode_retry_at + SETUP_TIMEOUT;
+}
+
+static bool change_mode(wifi_mode_t mode, wifi_state_t next_state)
+{
+    esp_err_t result = esp_wifi_set_mode(mode);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "Could not change Wi-Fi mode to %d: %s", (int)mode, esp_err_to_name(result));
+        return false;
+    }
+    s_state = next_state;
+    return true;
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -93,8 +105,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             s_state = SETUP_READY;
         }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_STOP && s_state == SETUP_STOPPING_STA) {
-        s_state = SETUP_STARTING;
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+        s_state = SETUP_ENABLE_STA;
+        s_mode_retry_at = esp_timer_get_time();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Station disconnected (reason %u)", (unsigned)event->reason);
@@ -103,23 +115,37 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         } else if (s_state == NORMAL || s_state == SETUP_SAVED) {
             s_address[0] = '\0';
             s_retry_at = esp_timer_get_time() + RETRY_DELAY;
+            if (s_state == SETUP_SAVED) {
+                s_deadline = 0;
+            }
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = data;
-        if (event->esp_netif == s_station && event->ip_info.ip.addr != 0) {
+        esp_netif_ip_info_t current;
+        if (event->esp_netif == s_station && event->ip_info.ip.addr != 0 &&
+            (s_state == SETUP_TESTING || s_state == SETUP_SAVED) &&
+            esp_netif_is_netif_up(s_station) &&
+            esp_netif_get_ip_info(s_station, &current) == ESP_OK && current.ip.addr == event->ip_info.ip.addr) {
             if (s_state == SETUP_TESTING) {
                 esp_err_t result = wifi_credentials_save(&s_candidate);
                 memset(&s_candidate, 0, sizeof(s_candidate));
                 if (result == ESP_OK) {
                     s_state = SETUP_SAVED;
-                    s_message = "Wi-Fi saved. Rejoin your normal Wi-Fi and open the dashboard address below.";
-                    s_deadline = esp_timer_get_time() + SETUP_SUCCESS_GRACE;
+                    s_handoff_limit = esp_timer_get_time() + SETUP_MAX_HANDOFF;
+                    s_mode_retry_at = 0;
+                } else if (result == ESP_ERR_NVS_REMOVE_FAILED) {
+                    ESP_LOGW(TAG, "Previous Wi-Fi settings could not be removed; new settings may apply on restart");
+                    setup_failed("Could not confirm the save. The new settings may apply after a restart. "
+                                 "Try saving again, or restart and check the connection.");
                 } else {
                     ESP_LOGE(TAG, "Could not save Wi-Fi settings: %s", esp_err_to_name(result));
                     setup_failed("Connected, but could not save settings. Try again.");
                 }
             }
             if (s_state == SETUP_SAVED) {
+                if (s_address[0] == '\0') {
+                    s_deadline = esp_timer_get_time() + SETUP_SUCCESS_GRACE;
+                }
                 snprintf(s_address, sizeof(s_address), IPSTR, IP2STR(&event->ip_info.ip));
             }
         }
@@ -138,11 +164,54 @@ static void handle_setup_button(int64_t held)
         }
         ESP_LOGE(TAG, "Could not clear Wi-Fi settings: %s", esp_err_to_name(result));
     } else if (held >= 5 * SECOND_US && s_state == NORMAL) {
-        s_message = "Choose the Wi-Fi network for your monitor.";
-        s_retry_at = 0;
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-        s_address[0] = '\0';
-        reset_setup_station();
+        if (change_mode(WIFI_MODE_AP, SETUP_STOPPING_STA)) {
+            s_message = "Choose the Wi-Fi network for your monitor.";
+            s_address[0] = '\0';
+            s_retry_at = 0;
+            s_deadline = esp_timer_get_time() + SETUP_TIMEOUT;
+        }
+    }
+}
+
+static void maintain_setup(int64_t now)
+{
+    switch (s_state) {
+    case SETUP_TESTING:
+        if (now >= s_deadline) {
+            setup_failed("Timed out waiting for an IP address. Check your router and try again.");
+        }
+        break;
+
+    case SETUP_RESET_STA:
+    case SETUP_STOPPING_STA:
+    case SETUP_ENABLE_STA:
+    case SETUP_STARTING:
+        if (now >= s_deadline) {
+            ESP_LOGE(TAG, "Could not recover the setup station. Restarting the monitor.");
+            esp_restart();
+        } else if (now >= s_mode_retry_at) {
+            if (s_state == SETUP_RESET_STA) {
+                change_mode(WIFI_MODE_AP, SETUP_STOPPING_STA);
+            } else if (s_state == SETUP_ENABLE_STA) {
+                change_mode(WIFI_MODE_APSTA, SETUP_STARTING);
+            }
+            s_mode_retry_at = now + MODE_RETRY_DELAY;
+        }
+        break;
+
+    case SETUP_SAVED:
+        if ((now >= s_handoff_limit || (s_deadline != 0 && now >= s_deadline)) &&
+            now >= s_mode_retry_at && !change_mode(WIFI_MODE_STA, NORMAL)) {
+            if (now >= s_handoff_limit + SETUP_TIMEOUT) {
+                ESP_LOGE(TAG, "Could not stop the setup hotspot. Restarting the monitor.");
+                esp_restart();
+            }
+            s_mode_retry_at = now + MODE_RETRY_DELAY;
+        }
+        break;
+
+    default:
+        break;
     }
 }
 
@@ -164,20 +233,7 @@ static void wifi_maintenance(void *arg)
             pressed_at = 0;
         }
 
-        if (s_state == SETUP_TESTING && now >= s_deadline) {
-            setup_failed("Timed out waiting for an IP address. Check your router and try again.");
-        } else if ((s_state == SETUP_STOPPING_STA || s_state == SETUP_STARTING) && now >= s_deadline) {
-            ESP_LOGE(TAG, "Wi-Fi station did not restart. Restarting the monitor.");
-            esp_restart();
-        } else if (s_state == SETUP_SAVED && now >= s_deadline) {
-            esp_err_t result = esp_wifi_set_mode(WIFI_MODE_STA);
-            if (result == ESP_OK) {
-                s_state = NORMAL;
-            } else {
-                ESP_LOGE(TAG, "Could not stop the setup hotspot: %s", esp_err_to_name(result));
-                esp_restart();
-            }
-        }
+        maintain_setup(now);
         if ((s_state == NORMAL || s_state == SETUP_SAVED) && s_retry_at != 0 && now >= s_retry_at) {
             esp_err_t result = esp_wifi_connect();
             s_retry_at = result == ESP_OK ? 0 : now + RETRY_DELAY;
@@ -309,6 +365,11 @@ wifi_setup_status_t wifi_manager_setup_status(void)
         .busy = s_scanning || (s_state != SETUP_READY && s_state != SETUP_SAVED),
         .saved = s_state == SETUP_SAVED,
     };
+    if (status.saved) {
+        status.message = s_address[0]
+            ? "Wi-Fi saved. Rejoin your normal Wi-Fi and open the dashboard address below."
+            : "Wi-Fi saved. Waiting for the monitor to reconnect and receive a dashboard address.";
+    }
     memcpy(status.address, s_address, sizeof(status.address));
     xSemaphoreGive(s_lock);
     return status;

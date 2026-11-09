@@ -38,11 +38,11 @@ Connect the DHT11 data pin to GPIO 4 and add a 4.7-10 kOhm pull-up resistor from
 1. Flash with `idf.py -p COM_PORT flash monitor`. If no settings are saved, the ESP32 prints the setup network name and its randomly generated WPA2 password.
 2. Join that network and visit [http://192.168.4.1/](http://192.168.4.1/) in a browser. Choose **Scan for networks** or enter the SSID manually, including for hidden networks. Use a 2.4 GHz personal Wi-Fi network, or leave the password blank for an open network.
 3. Select **Test and save Wi-Fi**. Setup stays available during the test. If your phone drops the hotspot while the ESP32 changes Wi-Fi channels, rejoin it and reload the page.
-4. Once the ESP32 receives an IP address, it saves the settings and shows the dashboard address for up to 30 seconds. Rejoin your usual Wi-Fi and open that address. You can also find it in the serial monitor.
+4. Once the ESP32 receives an IP address, it saves the settings and displays the dashboard address. If the station disconnects before the hotspot shuts down, the page waits for a new address. The hotspot normally closes after 30 seconds with an address, or after two minutes if the connection keeps dropping. Rejoin your usual Wi-Fi and open the dashboard address. You can also find it in the serial monitor.
 
 Settings survive a restart or a firmware flash that preserves NVS. They are stored in the `qair_wifi` namespace, separate from Wi-Fi driver storage. The default build does not encrypt NVS. Upgrading from the old `secrets.h` firmware requires setup once, since that build kept the station configuration in RAM. Keep any old firmware images that contain compiled-in credentials private.
 
-- **Change Wi-Fi:** while the firmware is running, hold the setup button for 5 to under 15 seconds and release. Follow the same setup steps. A failed test keeps the last saved network. Power-cycle the device to cancel reconfiguration and reconnect to that network.
+- **Change Wi-Fi:** while the firmware is running, hold the setup button for 5 to under 15 seconds and release. Follow the same setup steps. A failed connection test keeps the last saved network. If a flash error leaves the save unconfirmed, the page warns that the new settings may apply after a restart. Power-cycle the device to cancel an unfinished reconfiguration.
 - **Clear Wi-Fi:** hold the setup button for at least 15 seconds and release. This clears the saved Wi-Fi settings and restarts in setup mode.
 - **Router offline:** the monitor continues sampling and retries every five seconds after a disconnect. The setup hotspot stays off until you request it.
 

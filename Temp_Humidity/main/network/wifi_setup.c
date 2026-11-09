@@ -3,12 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
+#include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "wifi_manager.h"
 
 #define SETUP_HOST "192.168.4.1"
 #define MAX_SCAN_RESULTS 16
+#define CREDENTIAL_READ_BUDGET_US INT64_C(5000000)
 
 static const char setup_page[] =
     "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
@@ -26,7 +29,7 @@ static const char setup_page[] =
     "<label>Nearby networks<select id='networks' disabled>"
     "<option value=''>Enter a network below</option></select></label>"
     "<button id='scan' type='button'>Scan for networks</button>"
-    "<label>Network name (SSID)<input id='ssid' required></label>"
+    "<label>Network name (SSID)<input id='ssid'></label>"
     "<label>Password<input id='password' type='password' autocomplete='new-password'></label>"
     "<p>Leave the password empty for an open network.</p>"
     "<button type='submit'>Test and save Wi-Fi</button></fieldset></form>"
@@ -35,10 +38,10 @@ static const char setup_page[] =
     "const controls=byId('controls'), message=byId('message'), address=byId('address');"
     "const networks=byId('networks'), ssid=byId('ssid'), password=byId('password');"
     "const encoder=new TextEncoder(), decoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});"
-    "let working=false,busy=true,saved=false,feedback='',operation=0;"
+    "let working=false,busy=true,saved=false,feedback='',operation=0,savedAt=0;"
     "function update(){controls.disabled=working||busy||saved;}"
     "async function refresh(){"
-    " if(working||saved)return;"
+    " if(working)return;"
     " const version=operation;"
     " try{"
     "  const response=await fetch('/setup/status',{cache:'no-store'});"
@@ -46,28 +49,41 @@ static const char setup_page[] =
     "  const status=await response.json();"
     "  if(version!==operation)return;"
     "  busy=status.busy;saved=status.saved;"
-    "  message.textContent=feedback||status.message;"
+    "  if(saved&&!savedAt)savedAt=Date.now();"
+    "  message.textContent=saved?status.message:(feedback||status.message);"
     "  if(status.address){"
     "   const link=document.createElement('a');link.href='http://'+status.address+'/';"
     "   link.textContent=link.href;address.replaceChildren(link);"
-    "  }"
+    "  }else address.replaceChildren();"
     "  if(saved)password.value='';"
-    " }catch{if(version===operation)message.textContent='Rejoin the setup hotspot to check the connection.';}"
+    " }catch{"
+    "  if(version===operation&&!address.firstChild){"
+    "   message.textContent=saved?'Wi-Fi was saved. Check the serial monitor for the dashboard address.'"
+    "    :'Rejoin the setup hotspot to check the connection.';"
+    "  }"
+    " }"
     " update();"
     "}"
-    "networks.addEventListener('change',()=>{if(networks.value)ssid.value=networks.value;});"
+    "const fromHex=hex=>Uint8Array.from(hex.match(/../g),byte=>parseInt(byte,16));"
+    "networks.addEventListener('change',()=>{"
+    " ssid.value=networks.value?networks.options[networks.selectedIndex].textContent:'';"
+    "});"
+    "ssid.addEventListener('input',()=>{networks.value='';});"
     "byId('scan').addEventListener('click',async()=>{"
     " ++operation;working=true;feedback='';update();message.textContent='Scanning for networks…';"
     " try{"
     "  const response=await fetch('/setup/networks',{cache:'no-store'});"
     "  if(!response.ok)throw Error();"
-    "  const names=new Set();"
-    "  for(const hex of (await response.text()).trim().split('\\n')){"
-    "   if(!hex)continue;"
-    "   try{names.add(decoder.decode(Uint8Array.from(hex.match(/../g),byte=>parseInt(byte,16))));}catch{}"
-    "  }"
+    "  const selected=networks.value;"
+    "  const names=new Set((await response.text()).trim().split('\\n').filter(Boolean));"
     "  networks.replaceChildren(new Option('Enter a network below',''));"
-    "  for(const name of names)networks.add(new Option(name,name));"
+    "  for(const hex of names){"
+    "   let label;"
+    "   try{label=decoder.decode(fromHex(hex));}catch{}if(!label||!label.trim())label='SSID 0x'+hex;"
+    "   networks.add(new Option(label,hex));"
+    "  }"
+    "  if(names.has(selected))networks.value=selected;"
+    "  else if(selected)ssid.value='';"
     "  networks.disabled=!names.size;"
     "  if(!names.size)feedback='No networks found. Enter the network name manually.';"
     " }catch{feedback='Could not scan. Try again or enter the network name manually.';}"
@@ -75,7 +91,8 @@ static const char setup_page[] =
     "});"
     "byId('setup').addEventListener('submit',async event=>{"
     " event.preventDefault();feedback='';"
-    " const name=encoder.encode(ssid.value),key=encoder.encode(password.value);"
+    " const name=networks.value?fromHex(networks.value):encoder.encode(ssid.value);"
+    " const key=encoder.encode(password.value);"
     " if(name.length<1||name.length>32||key.length>64){"
     "  feedback='Enter an SSID of 1–32 bytes and a password of up to 64 bytes.';"
     "  message.textContent=feedback;return;"
@@ -90,7 +107,9 @@ static const char setup_page[] =
     " }catch{message.textContent='Rejoin the setup hotspot to check the connection.';}"
     " finally{working=false;await refresh();}"
     "});"
-    "async function poll(){await refresh();if(!saved)setTimeout(poll,1500);}poll();"
+    "async function poll(){"
+    " await refresh();if(!savedAt||Date.now()-savedAt<150000)setTimeout(poll,1500);"
+    "}poll();"
     "</script></body></html>";
 
 bool wifi_setup_request(httpd_req_t *req)
@@ -132,14 +151,29 @@ static void setup_response(httpd_req_t *req, const char *type)
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
 }
 
+/* A successful handler return tells HTTPD to drain any unread body before
+ * reusing the socket. Close rejected requests instead. */
+static esp_err_t reject_and_close(httpd_req_t *req, httpd_err_code_t code, const char *message)
+{
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send_err(req, code, message);
+    return ESP_FAIL;
+}
+
 esp_err_t wifi_setup_send_page(httpd_req_t *req)
 {
+    if (req->content_len != 0) {
+        return reject_and_close(req, HTTPD_400_BAD_REQUEST, "This setup route does not accept a request body");
+    }
     setup_response(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, setup_page);
 }
 
 static esp_err_t send_status(httpd_req_t *req)
 {
+    if (req->content_len != 0) {
+        return reject_and_close(req, HTTPD_400_BAD_REQUEST, "This setup route does not accept a request body");
+    }
     if (!wifi_setup_request(req)) {
         return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
     }
@@ -156,6 +190,9 @@ static esp_err_t send_status(httpd_req_t *req)
 
 static esp_err_t send_networks(httpd_req_t *req)
 {
+    if (req->content_len != 0) {
+        return reject_and_close(req, HTTPD_400_BAD_REQUEST, "This setup route does not accept a request body");
+    }
     if (!wifi_setup_request(req)) {
         return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
     }
@@ -191,30 +228,67 @@ static esp_err_t send_networks(httpd_req_t *req)
     return result == ESP_OK ? httpd_resp_send_chunk(req, NULL, 0) : result;
 }
 
+static esp_err_t receive_credentials(httpd_req_t *req, uint8_t *body)
+{
+    int fd = httpd_req_to_sockfd(req);
+    struct timeval previous_timeout;
+    socklen_t option_size = sizeof(previous_timeout);
+    if (lwip_getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &previous_timeout, &option_size) != 0) {
+        return reject_and_close(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not read socket timeout");
+    }
+
+    const int64_t deadline = esp_timer_get_time() + CREDENTIAL_READ_BUDGET_US;
+    size_t length = 0;
+    while (length < req->content_len) {
+        int64_t remaining_us = deadline - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            return reject_and_close(req, HTTPD_408_REQ_TIMEOUT, "Wi-Fi setup request timed out");
+        }
+        /* lwIP stores socket timeouts in milliseconds; zero disables it. */
+        int64_t remaining_ms = (remaining_us + 999) / 1000;
+        struct timeval timeout = {
+            .tv_sec = remaining_ms / 1000,
+            .tv_usec = (remaining_ms % 1000) * 1000,
+        };
+        if (lwip_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) {
+            return reject_and_close(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not set socket timeout");
+        }
+        int received = httpd_req_recv(req, (char *)body + length, req->content_len - length);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT || esp_timer_get_time() >= deadline) {
+            return reject_and_close(req, HTTPD_408_REQ_TIMEOUT, "Wi-Fi setup request timed out");
+        }
+        if (received <= 0) {
+            return ESP_FAIL;
+        }
+        length += (size_t)received;
+    }
+
+    if (lwip_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &previous_timeout, option_size) != 0) {
+        return reject_and_close(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not restore socket timeout");
+    }
+    return ESP_OK;
+}
+
 static esp_err_t connect_network(httpd_req_t *req)
 {
     if (!wifi_setup_request(req)) {
-        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
+        return reject_and_close(req, HTTPD_404_NOT_FOUND, "Not found");
     }
 
     char header[2];
     if (httpd_req_get_hdr_value_str(req, "X-Q-Air-Setup", header, sizeof(header)) != ESP_OK ||
         strcmp(header, "1") != 0) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Use the Wi-Fi setup page");
+        return reject_and_close(req, HTTPD_400_BAD_REQUEST, "Use the Wi-Fi setup page");
     }
 
-    /* One SSID-length byte, then SSID and password bytes. The browser sends UTF-8. */
+    /* One SSID-length byte, then SSID and password bytes. */
     uint8_t body[1 + 32 + 64];
-    if (req->content_len < 2 || req->content_len > sizeof(body)) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid credential lengths");
+    size_t length = req->content_len;
+    if (length < 2 || length > sizeof(body)) {
+        return reject_and_close(req, HTTPD_400_BAD_REQUEST, "Invalid credential lengths");
     }
-    size_t length = 0;
-    while (length < req->content_len) {
-        int received = httpd_req_recv(req, (char *)body + length, req->content_len - length);
-        if (received <= 0) {
-            return ESP_FAIL;
-        }
-        length += received;
+    if (receive_credentials(req, body) != ESP_OK) {
+        return ESP_FAIL;
     }
 
     size_t ssid_length = body[0];
