@@ -8,11 +8,11 @@ The firmware reads a DHT11 temperature/humidity sensor every 2.5 seconds, pulses
 
 - `main/main.c` - application startup and periodic sensor read loop
 - `main/include/app_config.h` - GPIO pins and timing
-- `main/include/secrets.h` - local Wi-Fi SSID and password
-- `main/include/secrets.example.h` - shareable credentials template
 - `main/sensors/sensor_dht11.c` - DHT11 GPIO protocol reader
 - `main/hardware/status_led.c` - read-activity LED pulse
-- `main/network/wifi_manager.c` - Wi-Fi station connection
+- `main/network/wifi_manager.c` - setup hotspot, station connection, and recovery button
+- `main/network/wifi_credentials.c` - Wi-Fi credential storage in NVS
+- `main/network/wifi_setup.c` - browser setup page and endpoints
 - `main/network/timesync.c` - SNTP clock synchronization
 - `main/network/web_server.c` - browser page and JSON endpoint
 
@@ -20,6 +20,7 @@ The firmware reads a DHT11 temperature/humidity sensor every 2.5 seconds, pulses
 
 - DHT11 data pin: `GPIO_NUM_4`
 - Status LED pin: `GPIO_NUM_2`
+- Wi-Fi setup button: `GPIO_NUM_0` with pull-up (BOOT on typical ESP32 dev boards)
 - Sensor power-up delay: 1000 ms
 - Sensor read period: 2500 ms
 - LED pulse hold time: 60 ms
@@ -34,18 +35,22 @@ Connect the DHT11 data pin to GPIO 4 and add a 4.7-10 kOhm pull-up resistor from
 
 ## Wi-Fi Setup
 
-If `main/include/secrets.h` is missing, copy `main/include/secrets.example.h` to that name. Then edit `secrets.h` before building:
+1. Flash with `idf.py -p COM_PORT flash monitor`. If no settings are saved, the ESP32 prints the setup network name and its randomly generated WPA2 password.
+2. Join that network and visit [http://192.168.4.1/](http://192.168.4.1/) in a browser. Choose **Scan for networks** or enter the SSID manually, including for hidden networks. Use a 2.4 GHz personal Wi-Fi network, or leave the password blank for an open network.
+3. Select **Test and save Wi-Fi**. Setup stays available during the test. If your phone drops the hotspot while the ESP32 changes Wi-Fi channels, rejoin it and reload the page.
+4. Once the ESP32 receives an IP address, it saves the settings and shows the dashboard address for up to 30 seconds. Rejoin your usual Wi-Fi and open that address. You can also find it in the serial monitor.
 
-```c
-#define WIFI_SSID "YOUR_WIFI_NAME"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-```
+Settings survive a restart or a firmware flash that preserves NVS. They are stored in the `qair_wifi` namespace, separate from Wi-Fi driver storage. The default build does not encrypt NVS. Upgrading from the old `secrets.h` firmware requires setup once, since that build kept the station configuration in RAM. Keep any old firmware images that contain compiled-in credentials private.
 
-`secrets.h` is ignored by Git. Keep `secrets.example.h` as the template if you publish the project. Build output is ignored too: the firmware binary contains the compiled credentials. Wi-Fi uses RAM configuration storage, avoiding new credential/configuration writes to NVS. Credentials written by older firmware are not erased by this setting.
+- **Change Wi-Fi:** while the firmware is running, hold the setup button for 5 to under 15 seconds and release. Follow the same setup steps. A failed test keeps the last saved network. Power-cycle the device to cancel reconfiguration and reconnect to that network.
+- **Clear Wi-Fi:** hold the setup button for at least 15 seconds and release. This clears the saved Wi-Fi settings and restarts in setup mode.
+- **Router offline:** the monitor continues sampling and retries every five seconds after a disconnect. The setup hotspot stays off until you request it.
+
+If your board lacks a BOOT button on GPIO 0, configure `APP_WIFI_SETUP_GPIO` for a suitable input and use a momentary switch to ground. Press BOOT only while the firmware is running. Holding it during a reset can enter the ESP32 bootloader.
 
 ## Web Page
 
-After flashing, open the IP address printed in the serial monitor:
+After Wi-Fi setup, open the IP address printed in the serial monitor:
 
 ```text
 I web: Web server available at http://192.168.x.x

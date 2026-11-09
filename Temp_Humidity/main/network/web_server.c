@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "wifi_setup.h"
 
 #include <stdbool.h>
 #include <math.h>
@@ -230,6 +231,10 @@ static void update_history(const dht11_reading_t *reading)
 
 static esp_err_t send_home_page(httpd_req_t *req)
 {
+    if (wifi_setup_request(req)) {
+        return wifi_setup_send_page(req);
+    }
+
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, s_home_page, HTTPD_RESP_USE_STRLEN);
@@ -439,6 +444,9 @@ esp_err_t web_server_start(void)
     }
     if (result == ESP_OK) {
         result = httpd_register_uri_handler(s_server, &blink_toggle_api);
+    }
+    if (result == ESP_OK) {
+        result = wifi_setup_register_routes(s_server);
     }
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register HTTP route: %s", esp_err_to_name(result));
