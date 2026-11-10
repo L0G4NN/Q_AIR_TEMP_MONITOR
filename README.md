@@ -11,6 +11,7 @@ The maintained firmware is in [`Temp_Humidity`](Temp_Humidity/README.md). The ol
 | Target | Original ESP32 |
 | DHT11 data | GPIO 4 |
 | Status LED | GPIO 2, active high |
+| Wi-Fi setup button | GPIO 0, active low (BOOT on typical ESP32 dev boards) |
 | Sensor interval | 2.5 seconds |
 | History | 1,440 one-minute averages in RAM |
 | Time synchronization | SNTP using `pool.ntp.org` |
@@ -21,19 +22,19 @@ Power the DHT11 from 3.3 V, share ground with the ESP32, and use a 4.7-10 kOhm p
 
 Use an ESP-IDF 6.0 terminal with its Python environment and toolchain activated. From the repository root:
 
-```powershell
-Copy-Item Temp_Humidity/main/include/secrets.example.h Temp_Humidity/main/include/secrets.h
-```
-
-Run the copy only for a fresh checkout; edit your existing `secrets.h` if it is already present. Enter your Wi-Fi name and password there, then build:
-
 ```text
 cd Temp_Humidity
 idf.py build
 idf.py -p COM_PORT flash monitor
 ```
 
-Replace `COM_PORT` with your board's port. The checked-in `sdkconfig` targets `esp32`. For another ESP32 family chip, run `idf.py set-target YOUR_TARGET` before building and check the GPIO assignments. After flashing, open the local IP address printed in the serial monitor.
+Replace `COM_PORT` with your board's port. The checked-in configuration targets the original ESP32.
+
+1. On first boot, join the `Q-Air-Setup-XXXX` Wi-Fi network using the setup password printed in the serial monitor. If your phone flags the hotspot as having no internet, stay connected to it.
+2. Open [http://192.168.4.1/](http://192.168.4.1/), choose or enter your 2.4 GHz network, and select **Test and save Wi-Fi**.
+3. When setup shows the dashboard address, rejoin your normal Wi-Fi and open that address. The serial monitor also prints it.
+
+To change networks, hold **BOOT** for at least 5 seconds and release it while the monitor is running. To clear its saved Wi-Fi settings, hold **BOOT** for at least 15 seconds and release it. See the [firmware README](Temp_Humidity/README.md#wifi-setup) for details.
 
 ## Dashboard and API
 
@@ -48,8 +49,6 @@ Failed sensor reads retain the last good value and mark it stale. History averag
 
 Sampling continues through Wi-Fi outages. Wi-Fi reconnects automatically, and SNTP restarts after an IP address is acquired. The browser displays synchronized timestamps in its own local timezone.
 
-## Credentials
-
-`secrets.h`, build output, and local agent settings are ignored by Git. Only the placeholder `secrets.example.h` should be shared. Wi-Fi configuration uses RAM storage to avoid writing another copy to NVS; this does not erase configuration stored by older firmware. Credentials are still compiled into firmware binaries, so keep generated binaries private.
+Wi-Fi credentials are entered after flashing and stored in the ESP32's NVS partition. Firmware builds do not need `secrets.h`. An ESP32 upgraded from the old firmware needs to be set up once.
 
 See the [firmware README](Temp_Humidity/README.md) for implementation details and verification commands.
