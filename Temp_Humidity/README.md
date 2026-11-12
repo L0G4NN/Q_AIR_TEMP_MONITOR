@@ -85,20 +85,41 @@ Replace `COM_PORT` with the board serial port.
 
 - Sensor start pulses yield to FreeRTOS rather than busy-waiting for 20 ms. The short microsecond frame capture remains protected from scheduling interruptions.
 - The next read is scheduled from the completion of each sensor attempt so delayed wake-ups preserve the configured minimum interval.
-- Checksum and range checks reject corrupt frames, including humidity above 100%. Failed reads retain the last good dashboard values.
+- Checksum and range checks reject corrupt frames, including humidity above 100% and temperatures outside -20 to 60 C. The DHT11 V1.3 sign bit is decoded before checking the temperature range. Failed reads retain the last good dashboard values.
 - LED toggle state and GPIO updates share a lock across the HTTP and sampling tasks.
 - SNTP initializes once before registering its IP handler and restarts synchronization on IP acquisition.
 - History samples occupy 8 bytes each (11,520 bytes for the ring). An HTTP request snapshots populated samples before transmission, temporarily allocating up to another 11,520 bytes. Copies use at most two contiguous memory operations; JSON records are batched into HTTP chunks.
-- JSON formatting checks response bounds, and live browser polling waits for each request to complete before scheduling another.
+- History JSON is formatted directly from stored integer tenths, including negative values, avoiding repeated floating-point conversion for up to 1,440 records. Formatting checks response bounds.
+- Both browser pages bound requests to eight seconds and resume polling after a timeout. Setup status polling prevents overlapping status requests.
+- The dashboard and setup APIs close requests with unexpected bodies before HTTPD can drain those bodies and hold up other clients. Credential uploads retain their five-second total body-read budget.
 
 The DHT11 has coarse measurement resolution. Averaged decimal values do not imply more precise hardware measurements. History does not persist across resets.
 
+The [manufacturer's DHT11 V1.3 datasheet](https://www.aosong.com/userfiles/files/media/DHT11-V1_3%E8%AF%B4%E6%98%8E%E4%B9%A6%EF%BC%88%E8%AF%A6%E7%BB%86%E7%89%88%EF%BC%89.pdf) specifies a signed temperature format and an 18-30 ms start pulse. The nominal 20 ms start pulse yields to FreeRTOS, so scheduling delays can extend it. Verify that pulse and the short protected capture interval on the actual board.
+
+If NVS initialisation finds no free pages or a newer incompatible NVS format, the existing recovery path erases the NVS partition and logs a warning. Saved Wi-Fi settings must then be entered again. Clearing a setting removes it logically; it does not promise secure physical erasure of flash.
+
 ## Verification
 
-Build with `idf.py build` in this directory. From the repository root, run the browser regression tests with Node.js 18 or newer:
+Build with ESP-IDF 6.0 from this directory.
 
 ```text
-node Temp_Humidity/tests/test_web_ui.js
+idf.py build
 ```
 
-These tests execute the actual JavaScript embedded in the firmware, checking reboot display reset, sequential polling and timeouts, failed blink toggles, graph gaps, and isolated readings. They require no additional packages. A successful build and host tests do not validate DHT11 pulse timing or Wi-Fi reconnects on the physical board; verify those after flashing. Capture any history you need before flashing, since a reset clears the RAM buffer.
+From the repository root, run the browser and native regression suites.
+
+```text
+node --test Temp_Humidity/tests/test_web_ui.js Temp_Humidity/tests/test_wifi_setup_ui.js
+python3 Temp_Humidity/tests/run_native.py
+```
+
+The browser suite executes the actual JavaScript embedded in the firmware. It checks sequential polling and request timeouts, raw SSIDs, the saved-address handoff, failed blink toggles, graph gaps and isolated readings.
+
+The native suite compiles the actual sensor and web-server source using small SDK test doubles and GCC/Clang on Linux. It checks signed sensor frames and boundaries, checksum failures, minute averages and missing intervals, full-ring rollover, negative history JSON, and request rejection before mutation. It also compiles and exercises the legacy Arduino sketch with Wi-Fi/DHT test doubles. Set `CC` or `CXX` to select another compiler. Tests build in a temporary directory.
+
+Host tests do not measure hardware pulse timing, Wi-Fi association, DHCP or flash reliability. After flashing, check initial setup, a wrong password followed by a correct one, a router outage, channel changes, both BOOT actions, sensor disconnection and a known-temperature reading. Espressif QEMU can boot the firmware but does not emulate the ESP32 Wi-Fi radio.
+
+The setup AP and station receiving exactly the same IP address remains a deferred edge case. If it prevents setup completion, use the serial monitor to inspect the connection and reconfigure the network.
+
+The HTTP dashboard is intended for a trusted local network. It has no application authentication or TLS. Capture any history you need before flashing because restarting clears the RAM buffer.

@@ -1,5 +1,5 @@
 {
-	"name": "ESP-IDF QEMU",
+	"name": "Q Air Monitor - ESP-IDF 6.0",
 	"build": {
 		"dockerfile": "Dockerfile"
 	},

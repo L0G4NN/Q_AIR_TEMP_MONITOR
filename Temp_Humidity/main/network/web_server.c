@@ -229,8 +229,25 @@ static void update_history(const dht11_reading_t *reading)
     }
 }
 
+static esp_err_t require_empty_body(httpd_req_t *req)
+{
+    if (req->content_len == 0) {
+        return ESP_OK;
+    }
+
+    /* Returning failure closes the socket instead of making HTTPD drain a
+     * potentially unbounded body before it can serve another client. */
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "This route does not accept a request body");
+    return ESP_FAIL;
+}
+
 static esp_err_t send_home_page(httpd_req_t *req)
 {
+    if (require_empty_body(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     if (wifi_setup_request(req)) {
         return wifi_setup_send_page(req);
     }
@@ -242,6 +259,10 @@ static esp_err_t send_home_page(httpd_req_t *req)
 
 static esp_err_t send_reading_json(httpd_req_t *req)
 {
+    if (require_empty_body(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     char buffer[384];
     int length;
     web_reading_state_t state;
@@ -287,6 +308,10 @@ static esp_err_t send_reading_json(httpd_req_t *req)
 
 static esp_err_t toggle_blink(httpd_req_t *req)
 {
+    if (require_empty_body(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     bool enabled = status_led_toggle_blink_enabled();
     char response[32];
 
@@ -301,6 +326,10 @@ static esp_err_t toggle_blink(httpd_req_t *req)
 
 static esp_err_t send_history_json(httpd_req_t *req)
 {
+    if (require_empty_body(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     char buffer[768];
     history_sample_t *snapshot = NULL;
     size_t count;
@@ -361,13 +390,17 @@ static esp_err_t send_history_json(httpd_req_t *req)
                 break;
             }
         }
+        int temperature = snapshot[i].temperature_tenths_c;
+        unsigned temperature_magnitude = (unsigned)abs(temperature);
+        unsigned humidity = snapshot[i].humidity_tenths_percent;
         length = snprintf(buffer + used,
                  sizeof(buffer) - used,
-                 "%s{\"seconds_since_boot\":%lu,\"temperature_c\":%.1f,\"humidity_percent\":%.1f}",
+                 "%s{\"seconds_since_boot\":%lu,\"temperature_c\":%s%u.%u,\"humidity_percent\":%u.%u}",
                  i == 0 ? "" : ",",
                  (unsigned long)snapshot[i].seconds_since_boot,
-                 (double)snapshot[i].temperature_tenths_c / 10.0,
-                 (double)snapshot[i].humidity_tenths_percent / 10.0);
+                 temperature < 0 ? "-" : "",
+                 temperature_magnitude / 10, temperature_magnitude % 10,
+                 humidity / 10, humidity % 10);
         if (length < 0 || (size_t)length >= sizeof(buffer) - used) {
             result = ESP_FAIL;
             break;

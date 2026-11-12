@@ -144,6 +144,37 @@ esp_err_t dht11_init(gpio_num_t gpio_num)
     return ESP_OK;
 }
 
+static esp_err_t decode_frame(const uint8_t data[DHT11_BYTES], dht11_reading_t *reading)
+{
+    uint8_t checksum = data[0] + data[1] + data[2] + data[3];
+    ESP_RETURN_ON_FALSE(checksum == data[4], ESP_ERR_INVALID_CRC, TAG, "DHT11 checksum failed");
+    uint8_t temperature_decimal = data[3] & 0x7f;
+    ESP_RETURN_ON_FALSE(data[0] <= 100 && data[1] <= 9 && temperature_decimal <= 9,
+                        ESP_ERR_INVALID_RESPONSE,
+                        TAG,
+                        "DHT11 returned an out-of-range value");
+    ESP_RETURN_ON_FALSE(data[0] < 100 || data[1] == 0,
+                        ESP_ERR_INVALID_RESPONSE,
+                        TAG,
+                        "DHT11 humidity exceeds 100 percent");
+
+    /* DHT11 V1.3 encodes the temperature sign in byte 3, bit 7. */
+    int temperature_tenths = data[2] * 10 + temperature_decimal;
+    if ((data[3] & 0x80) != 0) {
+        temperature_tenths = -temperature_tenths;
+    }
+    ESP_RETURN_ON_FALSE(temperature_tenths >= -200 && temperature_tenths <= 600,
+                        ESP_ERR_INVALID_RESPONSE,
+                        TAG,
+                        "DHT11 temperature is outside -20 to 60 C");
+
+    reading->humidity_percent = (float)data[0] + ((float)data[1] / 10.0f);
+    reading->temperature_c = (float)temperature_tenths / 10.0f;
+    reading->temperature_f = (reading->temperature_c * 9.0f / 5.0f) + 32.0f;
+
+    return ESP_OK;
+}
+
 esp_err_t dht11_read(dht11_reading_t *reading)
 {
     ESP_RETURN_ON_FALSE(reading != NULL, ESP_ERR_INVALID_ARG, TAG, "reading is NULL");
@@ -160,7 +191,8 @@ esp_err_t dht11_read(dht11_reading_t *reading)
     ESP_RETURN_ON_ERROR(gpio_set_direction(s_sensor_gpio, GPIO_MODE_OUTPUT_OD),
                         TAG,
                         "failed to start DHT11 signal");
-    // The start pulse only has a minimum duration; yield instead of busy-waiting.
+    // Yield during the nominal 20 ms start pulse. Its maximum duration depends
+    // on scheduler latency; verify pulse timing on the physical board.
     // An extra tick covers starting the delay just before a tick boundary.
     vTaskDelay(pdMS_TO_TICKS(DHT11_START_SIGNAL_MS) + 1);
 
@@ -180,20 +212,5 @@ esp_err_t dht11_read(dht11_reading_t *reading)
     }
     ESP_RETURN_ON_ERROR(release_result, TAG, "failed to release DHT11 data line");
 
-    uint8_t checksum = data[0] + data[1] + data[2] + data[3];
-    ESP_RETURN_ON_FALSE(checksum == data[4], ESP_ERR_INVALID_CRC, TAG, "DHT11 checksum failed");
-    ESP_RETURN_ON_FALSE(data[0] <= 100 && data[1] <= 9 && data[2] <= 60 && data[3] <= 9,
-                        ESP_ERR_INVALID_RESPONSE,
-                        TAG,
-                        "DHT11 returned an out-of-range value");
-    ESP_RETURN_ON_FALSE(data[0] < 100 || data[1] == 0,
-                        ESP_ERR_INVALID_RESPONSE,
-                        TAG,
-                        "DHT11 humidity exceeds 100 percent");
-
-    reading->humidity_percent = (float)data[0] + ((float)data[1] / 10.0f);
-    reading->temperature_c = (float)data[2] + ((float)data[3] / 10.0f);
-    reading->temperature_f = (reading->temperature_c * 9.0f / 5.0f) + 32.0f;
-
-    return ESP_OK;
+    return decode_frame(data, reading);
 }

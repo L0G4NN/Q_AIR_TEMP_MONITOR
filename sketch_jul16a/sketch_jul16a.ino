@@ -14,6 +14,9 @@ float temperatureC = NAN;
 float temperatureF = NAN;
 float humidity = NAN;
 unsigned long lastSensorReadMs = 0;
+unsigned long lastWiFiRetryMs = 0;
+bool lastReadSucceeded = false;
+bool wifiReported = false;
 
 static void readSensor()
 {
@@ -25,13 +28,15 @@ static void readSensor()
 
   float newHumidity = dht.readHumidity();
   float newTemperatureC = dht.readTemperature();
-  float newTemperatureF = dht.readTemperature(true);
+  float newTemperatureF = dht.convertCtoF(newTemperatureC);
 
   if (isnan(newHumidity) || isnan(newTemperatureC) || isnan(newTemperatureF)) {
+    lastReadSucceeded = false;
     Serial.println("Failed to read from DHT11 sensor");
     return;
   }
 
+  lastReadSucceeded = true;
   humidity = newHumidity;
   temperatureC = newTemperatureC;
   temperatureF = newTemperatureF;
@@ -84,6 +89,9 @@ static void sendWebPage(WiFiClient &client)
     client.print("<p class=\"reading\">");
     client.print(humidity, 1);
     client.println(" %</p>");
+    if (!lastReadSucceeded) {
+      client.println("<p>Showing the last good values. The latest sensor read failed.</p>");
+    }
   }
 
   client.println("</main></body></html>");
@@ -99,16 +107,23 @@ void setup()
   Serial.println(ssid);
 
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
+  const unsigned long connectStartMs = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - connectStartMs < 10000) {
     delay(500);
     Serial.print(".");
   }
 
   Serial.println();
-  Serial.println("WiFi connected");
-  Serial.print("Open http://");
-  Serial.println(WiFi.localIP());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi connected");
+    Serial.print("Open http://");
+    Serial.println(WiFi.localIP());
+    wifiReported = true;
+  } else {
+    Serial.println("WiFi unavailable. Sampling continues while reconnecting.");
+  }
 
+  lastWiFiRetryMs = millis();
   server.begin();
 }
 
@@ -116,22 +131,45 @@ void loop()
 {
   readSensor();
 
+  if (WiFi.status() != WL_CONNECTED) {
+    wifiReported = false;
+    if (millis() - lastWiFiRetryMs >= 30000) {
+      lastWiFiRetryMs = millis();
+      WiFi.reconnect();
+    }
+    return;
+  }
+
+  if (!wifiReported) {
+    Serial.print("Open http://");
+    Serial.println(WiFi.localIP());
+    wifiReported = true;
+  }
+
   WiFiClient client = server.available();
   if (!client) {
     return;
   }
 
-  unsigned long timeoutMs = millis() + 2000;
-  while (client.connected() && millis() < timeoutMs) {
+  const unsigned long requestStartMs = millis();
+  unsigned int headerBytes = 0;
+  unsigned int lineLength = 0;
+  while (client.connected() && millis() - requestStartMs < 2000 && headerBytes < 1024) {
     if (!client.available()) {
       delay(1);
       continue;
     }
 
-    String requestLine = client.readStringUntil('\n');
-    if (requestLine == "\r") {
-      sendWebPage(client);
-      break;
+    const char next = static_cast<char>(client.read());
+    headerBytes++;
+    if (next == '\n') {
+      if (lineLength == 0) {
+        sendWebPage(client);
+        break;
+      }
+      lineLength = 0;
+    } else if (next != '\r') {
+      lineLength++;
     }
   }
 

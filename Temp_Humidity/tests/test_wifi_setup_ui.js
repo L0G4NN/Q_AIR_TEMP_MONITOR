@@ -34,30 +34,41 @@ async function openSetup() {
         }
         return elements.get(id);
     }
-    let poll;
-    vm.runInNewContext(script, {
+    let nextTimer = 0;
+    const timers = new Map();
+    const context = vm.createContext({
         document: { getElementById: element, createElement: () => ({}) },
-        TextEncoder, TextDecoder, Uint8Array,
+        TextEncoder, TextDecoder, Uint8Array, AbortController,
         Option: function (textContent, value) { Object.assign(this, { textContent, value }); },
-        setTimeout(callback) { poll = callback; },
+        setTimeout(callback, delay) { timers.set(++nextTimer, { callback, delay }); return nextTimer; },
+        clearTimeout(id) { timers.delete(id); },
         async fetch(url, options) {
+            if (model.fetch) return model.fetch(url, options);
             if (url === '/setup/status') return { ok: true, json: async () => model.status };
             if (url === '/setup/networks') return { ok: true, text: async () => model.scans };
             assert.equal(url, '/setup/connect');
             model.submitted.push(Buffer.from(options.body));
-            return { ok: true };
+            return { ok: true, text: async () => 'Testing Wi-Fi' };
         },
     });
+    vm.runInContext(script, context);
     await new Promise(setImmediate);
     return {
         model,
         element,
         async poll() {
-            assert.equal(typeof poll, 'function', 'the portal should have scheduled a status check');
-            const run = poll;
-            poll = undefined;
-            await run();
+            const entry = [...timers].find(([, timer]) => timer.delay === 1500);
+            assert.ok(entry, 'the portal should have scheduled a status check');
+            timers.delete(entry[0]);
+            await entry[1].callback();
         },
+        expireRequest() {
+            const entry = [...timers].find(([, timer]) => timer.delay === 8000);
+            assert.ok(entry, 'a request should have a timeout');
+            timers.delete(entry[0]);
+            entry[1].callback();
+        },
+        refresh: () => vm.runInContext('refresh()', context),
         scan: () => element('scan').events.click(),
         select(value) {
             element('networks').value = value;
@@ -116,4 +127,40 @@ test('scan preserves raw SSID bytes through selection, rescan and manual edits',
     element('ssid').events.input();
     await setup.submit();
     assert.deepEqual(model.submitted[2], Buffer.from('05636166c3a9', 'hex'));
+});
+
+test('hung status requests time out, resume polling and cannot overlap', async () => {
+    const setup = await openSetup();
+    let requests = 0;
+    setup.model.fetch = (_, options) => {
+        requests++;
+        return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => {
+            const error = Error('Request aborted');
+            error.name = 'AbortError';
+            reject(error);
+        }, { once: true }));
+    };
+    const pending = setup.poll();
+    await setup.refresh();
+    assert.equal(requests, 1);
+    setup.expireRequest();
+    await pending;
+    assert.match(setup.element('message').textContent, /Rejoin the setup hotspot/);
+    delete setup.model.fetch;
+    await setup.poll();
+    assert.equal(setup.element('message').textContent, 'Choose a network.');
+});
+
+test('a hung scan releases its controls after the timeout', async () => {
+    const setup = await openSetup();
+    setup.model.fetch = (url, options) => {
+        if (url === '/setup/status') return Promise.resolve({ok:true, json:async()=>setup.model.status});
+        return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(Error('timeout'))));
+    };
+    const pending = setup.scan();
+    assert.equal(setup.element('controls').disabled, true);
+    setup.expireRequest();
+    await pending;
+    assert.equal(setup.element('controls').disabled, false);
+    assert.match(setup.element('message').textContent, /Could not scan/);
 });

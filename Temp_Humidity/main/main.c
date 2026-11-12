@@ -21,6 +21,8 @@ static void init_nvs(void)
     esp_err_t result = nvs_flash_init();
 
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS recovery will erase saved settings (%s). Wi-Fi setup will be required.",
+                 esp_err_to_name(result));
         ESP_ERROR_CHECK(nvs_flash_erase());
         result = nvs_flash_init();
     }
