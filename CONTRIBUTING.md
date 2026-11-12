@@ -1,6 +1,6 @@
 # Contributing
 
-The maintained application is the ESP-IDF project in `Temp_Humidity`. The Arduino sketch is a legacy reference with a separate setup procedure.
+The maintained application is the ESP-IDF project in `Temp_Humidity`. The Arduino sketch is a legacy reference.
 
 ## Branch workflow
 
@@ -30,7 +30,7 @@ python3 Temp_Humidity/tests/run_native.py
 git diff --check
 ```
 
-The native tests need Python 3 and a Linux GCC/Clang C/C++ toolchain. They use test doubles for hardware and SDK services. No third-party Python or Node packages are needed.
+The native tests need Python 3 and a Linux GCC/Clang C toolchain. They use test doubles for hardware and SDK services. No third-party Python or Node packages are needed.
 
 Then activate the ESP-IDF environment and build the target.
 

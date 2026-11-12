@@ -4,7 +4,7 @@ An ESP32 desk temperature and humidity monitor using a DHT11 and ESP-IDF 6.0. Th
 
 ## Firmware and hardware
 
-The maintained firmware is in [`Temp_Humidity`](Temp_Humidity/README.md). The [legacy Arduino reference](sketch_jul16a/README.md) is in `sketch_jul16a`.
+The maintained firmware is in [`Temp_Humidity`](Temp_Humidity/README.md). The older Arduino reference is in `sketch_jul16a`.
 
 | Setting | Default |
 | --- | --- |
@@ -66,4 +66,4 @@ node --test Temp_Humidity/tests/test_web_ui.js Temp_Humidity/tests/test_wifi_set
 python3 Temp_Humidity/tests/run_native.py
 ```
 
-Native tests need Python 3 and a GCC/Clang C/C++ toolchain on Linux. They cover the sensor decoder, history aggregation/formatting, request-body rejection, and the Arduino reference using test doubles. The ESP-IDF target build and physical-board checks remain separate.
+Native tests need Python 3 and a GCC/Clang C toolchain on Linux. They cover the sensor decoder, history aggregation/formatting, and request-body rejection using SDK test doubles. The ESP-IDF target build and physical-board checks remain separate.

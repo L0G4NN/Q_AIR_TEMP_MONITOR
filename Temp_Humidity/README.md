@@ -116,7 +116,7 @@ python3 Temp_Humidity/tests/run_native.py
 
 The browser suite executes the actual JavaScript embedded in the firmware. It checks sequential polling and request timeouts, raw SSIDs, the saved-address handoff, failed blink toggles, graph gaps and isolated readings.
 
-The native suite compiles the actual sensor and web-server source using small SDK test doubles and GCC/Clang on Linux. It checks signed sensor frames and boundaries, checksum failures, minute averages and missing intervals, full-ring rollover, negative history JSON, and request rejection before mutation. It also compiles and exercises the legacy Arduino sketch with Wi-Fi/DHT test doubles. Set `CC` or `CXX` to select another compiler. Tests build in a temporary directory.
+The native suite compiles the actual sensor and web-server source using small SDK test doubles and GCC/Clang on Linux. It checks signed sensor frames and boundaries, checksum failures, minute averages and missing intervals, full-ring rollover, negative history JSON, and request rejection before mutation. Set `CC` to select another C compiler. Tests build in a temporary directory.
 
 Host tests do not measure hardware pulse timing, Wi-Fi association, DHCP or flash reliability. After flashing, check initial setup, a wrong password followed by a correct one, a router outage, channel changes, both BOOT actions, sensor disconnection and a known-temperature reading. Espressif QEMU can boot the firmware but does not emulate the ESP32 Wi-Fi radio.
 
