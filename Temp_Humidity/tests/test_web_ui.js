@@ -1,4 +1,4 @@
-// Run from any directory with: node Temp_Humidity/tests/test_web_ui.js
+// Run from the repository root with: node Temp_Humidity/tests/test_web_ui.js
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

@@ -45,10 +45,25 @@ To change networks, hold **BOOT** for at least 5 seconds and release it while th
 | `GET /api/history` | Minute averages with uptime and clock reference |
 | `POST /api/blink/toggle` | Toggle the automatic read LED pulse |
 
-Failed sensor reads retain the last good value and mark it stale. History averages successful reads only and omits empty intervals. The ring holds the latest 1,440 populated minutes: approximately 24 hours with continuous readings, potentially longer when readings are missing. History and blink selection reset on reboot. DHT11 output is coarse; decimal formatting and averaging do not increase the sensor's physical resolution.
+Failed sensor reads retain the last good value and mark it stale. History averages successful reads only and omits empty intervals. The ring holds the latest 1,440 populated minutes: approximately 24 hours with continuous readings, potentially longer when readings are missing. History and blink selection reset on reboot. DHT11 output is coarse; decimal formatting and averaging do not increase the sensor's physical resolution. The decoder supports the signed temperature format used by DHT11 V1.3 units and rejects values outside -20 to 60 C.
 
 Sampling continues through Wi-Fi outages. Wi-Fi reconnects automatically, and SNTP restarts after an IP address is acquired. The browser displays synchronized timestamps in its own local timezone.
 
 Wi-Fi credentials are entered after flashing and stored in the ESP32's NVS partition. Firmware builds do not need `secrets.h`. An ESP32 upgraded from the old firmware needs to be set up once.
 
 See the [firmware README](Temp_Humidity/README.md) for implementation details and verification commands.
+
+## Development and checks
+
+Use the long-lived `develop` branch for follow-up work and open pull requests into `main`. The [contribution guide](CONTRIBUTING.md) covers branch synchronisation, build checks and hardware verification.
+
+The development container defaults to ESP-IDF `v6.0`. Open `Temp_Humidity` as the VS Code workspace, select your installed ESP-IDF tools and serial port, and build once to generate the compilation database.
+
+From the repository root, run the dependency-free browser tests and native host tests.
+
+```text
+node --test Temp_Humidity/tests/test_web_ui.js Temp_Humidity/tests/test_wifi_setup_ui.js
+python3 Temp_Humidity/tests/run_native.py
+```
+
+Native tests need Python 3 and a GCC/Clang C toolchain on Linux. They cover the sensor decoder, history aggregation/formatting, and request-body rejection using SDK test doubles. The ESP-IDF target build and physical-board checks remain separate.
